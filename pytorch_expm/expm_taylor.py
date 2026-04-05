@@ -144,7 +144,7 @@ def taylor_approx(A, deg):
 # ============================
 # Основная функция expm_taylor
 # ============================
-def expm_taylor(A, order=14, tol=1e-16):
+def expm_taylor(A, order=13, tol=1e-16):
     """
     Вычисляет exp(A) методом Тейлора с выбранной степенью.
 

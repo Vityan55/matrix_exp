@@ -116,7 +116,7 @@ def _solve_P_Q(U, V):
     """
     Решает (V-U)X = V+U для Pade
     """
-    return torch.linalg.solve(U + V, -U + V)
+    return torch.linalg.solve(V - U, V + U)
 
 def _ell(A, m):
     """
@@ -157,12 +157,15 @@ def expm64(A):
 
     h = _ExpmPadeHelper(A)  # вспомогательный объект с кешем степеней
 
-    theta_13 = 4.25  # рекомендуемое значение для Pade13
+    theta_13 = 5.371920351148152  # рекомендуемое значение для Pade13
 
     # безопасная оценка масштаба
+    norm_A4 = _onenorm(h.A4)
+    norm_A6 = _onenorm(h.A6)
+
     eta = max(
-        _onenorm(h.A4)**0.25 if _onenorm(h.A4) > 0 else 0,
-        _onenorm(h.A6)**(1/6) if _onenorm(h.A6) > 0 else 0
+        norm_A4 ** 0.25 if norm_A4 > 0 else 0.0,
+        norm_A6 ** (1 / 6) if norm_A6 > 0 else 0.0
     )
 
     s = 0

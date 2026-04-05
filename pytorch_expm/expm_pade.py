@@ -117,7 +117,7 @@ def _pade9(A):
 # Основная функция expm_pade
 # ============================
 
-def expm_pade(A, order):
+def expm_pade(A, order=13):
     """
     Вычисляет exp(A) с помощью рациональной аппроксимации Паде
     и метода scaling & squaring.

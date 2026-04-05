@@ -1,10 +1,11 @@
-# expm_inference.py
-
+# expm_adaptive.py
 import torch  # для работы с тензорами и GPU
-from train_selector import SelectorHybridModel  # наша обученная модель выбора метода
-from expm_taylor import expm_taylor  # метод экспоненты через разложение Тейлора
+
 from expm_pade import expm_pade  # метод экспоненты через рациональную аппроксимацию Паде
+from expm_sketch import expm_pade_orthogonal_sketch
+from expm_taylor import expm_taylor  # метод экспоненты через разложение Тейлора
 from features import extract_features  # функция извлечения признаков матрицы
+from train_selector import SelectorHybridModel  # наша обученная модель выбора метода
 
 # -----------------------------
 # Определяем устройство вычислений
@@ -13,8 +14,8 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"  # если есть GPU
 
 # -----------------------------
 # Загружаем обученную модель выбора метода
-# -----------------------------
-checkpoint = torch.load("selector_hybrid.pt", map_location=DEVICE)  # загружаем веса и статистику
+# -----------------------------`
+checkpoint = torch.load("selector_hybrid_new.pt", map_location=DEVICE)  # загружаем веса и статистику
 model = SelectorHybridModel().to(DEVICE)  # создаем объект модели и отправляем на устройство
 model.load_state_dict(checkpoint["model"])  # загружаем обученные веса
 model.eval()  # режим inference (отключаем градиенты, dropout и др.)
@@ -46,43 +47,43 @@ def expm_hybrid(A):
     feats = extract_features(A)  # базовые признаки: нормы, след, симметрия, разреженность, спектральный радиус
 
     # -----------------------------
-    # Дополнительные признаки
-    # -----------------------------
-    A2 = A @ A  # A^2
-    A3 = A2 @ A  # A^3
-    feats_ext = torch.cat([feats, torch.tensor([
-        torch.trace(A2).float(),  # след квадрата
-        torch.trace(A3).float(),  # след куба
-        torch.linalg.norm(A2, 'fro').float()  # норма Фробениуса квадрата
-    ], device=A.device)])
-
-    # -----------------------------
     # Нормализация признаков (среднее и std из обучения)
     # -----------------------------
-    X = (feats_ext - mean) / std
+    X = (feats - mean) / std
 
     # -----------------------------
     # Предсказание метода
     # -----------------------------
     logits = model(X.unsqueeze(0))  # добавляем batch-измерение
-    pred = torch.argmax(logits, dim=-1).item()  # выбираем метод с наибольшей вероятностью
+    probs = torch.softmax(logits, dim=-1)
+    conf, pred = torch.max(probs, dim=-1)
+
+    #if conf.item() < 0.55:
+    #    return expm64(A.double())
 
     # -----------------------------
     # Соответствие индекса модели и метода + порядок
     # -----------------------------
     mapping = {
-        0: (expm_taylor, 6),
-        1: (expm_taylor, 10),
-        2: (expm_taylor, 14),
-        3: (expm_pade, 3),
-        4: (expm_pade, 5),
-        5: (expm_pade, 7),
-        6: (expm_pade, 9),
-        7: (expm_pade, 13)
+        0: ("Taylor", 4),
+        1: ("Taylor", 8),
+        2: ("Taylor", 12),
+        3: ("Pade", 3),
+        4: ("Pade", 5),
+        5: ("Pade", 7),
+        6: ("Pade", 9),
+        7: ("Pade", 13),
+        8: ("Sketch", (5, 32)),
+        9: ("Sketch", (7, 64)),
+        10: ("Sketch", (9, 96)),
     }
-    method, order = mapping[pred]  # получаем выбранный метод и порядок
 
-    # -----------------------------
-    # Вычисляем exp(A) выбранным методом
-    # -----------------------------
-    return method(A, order)
+    name, params = mapping[pred.item()]
+    print(f"[Adaptive] method={name}, params={params}, conf={conf.item():.3f}")
+
+    if name == "Taylor":
+        return expm_taylor(A, params)
+    elif name == "Pade":
+        return expm_pade(A, params)
+    else:
+        return expm_pade_orthogonal_sketch(A, params)

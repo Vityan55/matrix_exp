@@ -14,33 +14,20 @@ def safe_log(x):
     return torch.log1p(torch.abs(x))  # log1p(x) = log(1+x), работает лучше при малых x
 
 
-# ============================
-# Быстрая оценка спектрального радиуса
-# ============================
-def spectral_radius_estimate(A, iters=5):
-    """
-    Оценка спектрального радиуса матрицы A (максимальное по модулю собственное значение)
-    с помощью метода степенной итерации (power iteration).
-
-    Параметры:
-        A : torch.Tensor, размерность [n, n]
-        iters : int, количество итераций (по умолчанию 5)
-
-    Возвращает:
-        спектральный радиус (torch.float)
-    """
-
-    n = A.size(0)  # размерность матрицы n x n
-    v = torch.randn(n, device=A.device, dtype=A.dtype)  # случайный начальный вектор
+def spectral_norm_estimate(A, iters=6):
+    n = A.size(1)
+    v = torch.ones(n, device=A.device, dtype=A.dtype)
+    v = v / (torch.norm(v) + 1e-12)
 
     for _ in range(iters):
-        # применяем матрицу к вектору
-        v = A @ v
-        # нормируем вектор, чтобы не взрывались значения
-        v = v / (torch.norm(v) + 1e-12)  # 1e-12 для безопасности от деления на 0
+        v = A.T @ (A @ v)
+        nv = torch.norm(v)
+        if nv <= 1e-12:
+            return torch.tensor(0.0, device=A.device, dtype=A.dtype)
+        v = v / nv
 
-    # оцениваем спектральный радиус как ||A*v|| после итераций
-    return torch.norm(A @ v)
+    Av = A @ v
+    return torch.norm(Av)
 
 
 # ============================
@@ -62,7 +49,6 @@ def extract_features(A):
     # Нормы матрицы
     # ============================
     norm1 = torch.linalg.norm(A, 1)  # норма 1 (максимум суммы по столбцам)
-    norm_inf = torch.linalg.norm(A, float('inf'))  # норма бесконечность (макс сумма по строкам)
     norm_fro = torch.linalg.norm(A, 'fro')  # Фробениусова норма (sqrt(sum(A_ij^2)))
 
     # ============================
@@ -86,12 +72,6 @@ def extract_features(A):
     # Максимальные и средние значения
     # ============================
     max_val = torch.max(torch.abs(A))  # максимальное по модулю
-    mean_val = torch.mean(torch.abs(A))  # среднее по модулю (не используется в feats, можно добавить)
-
-    # ============================
-    # Спектральный радиус
-    # ============================
-    spec = spectral_radius_estimate(A)
 
     # ============================
     # Формируем вектор признаков
@@ -99,13 +79,11 @@ def extract_features(A):
     feats = torch.stack([
         torch.tensor(float(n), device=A.device),  # размер матрицы
         safe_log(norm1),  # log(1+||A||_1)
-        safe_log(norm_inf),  # log(1+||A||_∞)
         safe_log(norm_fro),  # log(1+||A||_F)
-        safe_log(trace),  # log(1+trace)
-        symmetry,  # симметрия
-        sparsity,  # разреженность
         safe_log(max_val),  # log(1+максимум)
-        safe_log(spec)  # log(1+спектральный радиус)
+        torch.sign(trace) * torch.log1p(torch.abs(trace)),
+        symmetry,  # симметрия
+        sparsity  # разреженность
     ])
 
     return feats  # возвращаем тензор признаков

@@ -1,5 +1,4 @@
-# train_selector_hybrid.py
-
+# train_selector.py
 import time  # для измерения времени выполнения функций
 import torch  # PyTorch для работы с матрицами и нейросетью
 import torch.nn as nn  # для построения нейронной сети
@@ -9,12 +8,18 @@ from torch.utils.data import DataLoader, TensorDataset  # удобный DataLoa
 from features import extract_features  # функция извлечения признаков из матриц
 from expm_taylor import expm_taylor  # твой метод Тейлора для exp(A)
 from expm_pade import expm_pade  # твой метод Паде для exp(A)
+from expm_sketch import expm_pade_orthogonal_sketch
 
 # ============================
 # Устройство для вычислений: GPU или CPU
 # ============================
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
+SKETCH_CONFIGS = [
+    (3, 32),
+    (5, 64),
+    (7, 96)
+]
 
 # ============================
 # Модель нейросети
@@ -24,7 +29,7 @@ class SelectorHybridModel(nn.Module):
     Нейросеть, которая на основе признаков матрицы предсказывает
     какой метод (Taylor/Pade) и параметры лучше использовать
     """
-    def __init__(self, input_dim=12, output_dim=8):
+    def __init__(self, input_dim=7, output_dim=11):
         super().__init__()
         # Сеточная структура:
         self.net = nn.Sequential(
@@ -121,36 +126,78 @@ def generate_matrix(n, kind):
 # ============================
 # Выбор наилучшего метода
 # ============================
-def evaluate_methods(A, tol=1e-6):
-    """
-    Сравнивает методы Тейлора и Паде с истинной exp(A)
-    Возвращает индекс "лучшего метода" в нашей схеме
-    """
-    true = torch.linalg.matrix_exp(A.double())  # "истинная" экспонента
-    norm_true = max(torch.norm(true), 1e-12)
+def evaluate_methods(A):
+    A = A.double()
+    true = torch.linalg.matrix_exp(A)
+    norm_true = torch.norm(true).clamp_min(1e-12)
+
     candidates = []
 
-    # Проверка Тейлора
-    for order in [6, 10, 14]:
+    # --- Taylor ---
+    for order in [4, 8, 12]:
         T, t = measure_time(expm_taylor, A, order)
-        if torch.norm(T - true)/norm_true < tol:
-            candidates.append((t, order))
+        err = torch.norm(T - true) / norm_true
+        candidates.append({
+            "err": err.item(),
+            "time": t,
+            "id": order
+        })
 
-    # Проверка Паде
-    for order in [3,5,7,9,13]:
+    # --- Pade ---
+    for order in [3, 5, 7, 9, 13]:
         P, t = measure_time(expm_pade, A, order)
-        if torch.norm(P - true)/norm_true < tol:
-            candidates.append((t, order+100))  # +100 чтобы отличать от Тейлора
+        err = torch.norm(P - true) / norm_true
+        candidates.append({
+            "err": err.item(),
+            "time": t,
+            "id": 100 + order
+        })
 
-    if not candidates:
-        return 7  # fallback
-    candidates.sort()  # сортировка по времени
-    best = candidates[0][1]
+    # --- Sketch ---
+    for i, (order, k) in enumerate(SKETCH_CONFIGS):
+        P, t = measure_time(expm_pade_orthogonal_sketch, A, (order, k))
+        err = torch.norm(P - true) / norm_true
+        candidates.append({
+            "err": err.item(),
+            "time": t,
+            "id": ("sketch", i)
+        })
 
-    # отображение на 0..7 классы
-    mapping = {6:0, 10:1, 14:2, 103:3,105:4,107:5,109:6,113:7}
-    return mapping[best]
+    # -----------------------------
+    # 🔥 НОРМАЛИЗАЦИЯ (ключевой момент!)
+    # -----------------------------
+    errs = torch.tensor([c["err"] for c in candidates])
+    times = torch.tensor([c["time"] for c in candidates])
 
+    # логарифм — чтобы сгладить масштаб
+    errs = torch.log10(errs + 1e-16)
+    times = torch.log10(times + 1e-12)
+
+    # нормализация в [0,1]
+    err_norm = (errs - errs.min()) / (errs.max() - errs.min() + 1e-8)
+    time_norm = (times - times.min()) / (times.max() - times.min() + 1e-8)
+
+    # -----------------------------
+    # 🧠 SCORE = баланс
+    # -----------------------------
+    alpha = 0.5  # точность
+    beta = 0.5   # скорость
+
+    scores = alpha * err_norm + beta * time_norm
+
+    # минимальный score — лучший
+    best_idx = torch.argmin(scores).item()
+    best_id = candidates[best_idx]["id"]
+
+    mapping = {
+        4: 0, 8: 1, 12: 2,
+        103: 3, 105: 4, 107: 5, 109: 6, 113: 7,
+        ("sketch", 0): 8,
+        ("sketch", 1): 9,
+        ("sketch", 2): 10
+    }
+
+    return mapping[best_id]
 
 # ============================
 # Генерация датасета для обучения
@@ -161,7 +208,7 @@ def build_dataset(samples_per_kind=5):
     X - признаки матриц
     y - метка лучшего метода
     """
-    sizes = [2,4,8,16,32,64,128,256,512,1024,2048]  # размеры матриц
+    sizes = [2,4,8,16,32,64,128,256,512,1024]  # размеры матриц
     kinds = [
         "random", "symmetric", "skew", "diagonal", "positive_diag",
         "nilpotent", "ill_conditioned", "hilbert", "permutation",
@@ -191,17 +238,9 @@ def build_dataset(samples_per_kind=5):
                             A = A * mask.float()
 
                         feats = extract_features(A)  # извлекаем признаки
-                        # добавляем дополнительные признаки
-                        A2 = A @ A
-                        A3 = A2 @ A
-                        feats_ext = torch.cat([feats, torch.tensor([
-                            torch.trace(A2).float(),  # след квадрата
-                            torch.trace(A3).float(),  # след куба
-                            torch.linalg.norm(A2, 'fro').float()  # норма Фробениуса A²
-                        ], device=A.device)])
 
                         label = evaluate_methods(A)  # находим лучший метод
-                        X.append(feats_ext)
+                        X.append(feats)
                         y.append(label)
 
     X = torch.stack(X)  # превращаем список в тензор
@@ -250,7 +289,7 @@ def normalize(X):
 # ============================
 # Обучение модели
 # ============================
-def train(batch_size=64, epochs=100):
+def train(batch_size=64, epochs=10000):
     """
     Основной цикл обучения модели
     """
@@ -282,7 +321,7 @@ def train(batch_size=64, epochs=100):
         "model": model.state_dict(),
         "mean": mean,
         "std": std
-    }, "selector_hybrid.pt")
+    }, "selector_hybrid_new.pt")
 
 
 # ============================

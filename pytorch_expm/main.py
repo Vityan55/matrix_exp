@@ -2,7 +2,9 @@
 import time
 import math
 from expm_adaptive import expm_hybrid as expm_adaptive
-from expm_taylor import expm_taylor  # Твой обычный Тейлор метод
+from expm_taylor import expm_taylor
+from expm_sketch import expm_pade_orthogonal_sketch
+from expm_pade import expm_pade
 
 import torch
 print("PyTorch version:", torch.__version__)
@@ -113,9 +115,17 @@ large_matrices = [
         [0., 0., 0., 0., 0., 0., 0., 1.]
     ], dtype=torch.float64)),
 
+    ("Random 20*20", torch.randn(20, 20)),
+    ("Random 50*50", torch.randn(50, 50)),
+    ("Random 75*75", torch.randn(75, 75)),
     ("Random 100*100", torch.randn(100, 100)),
+    ("Random 250*250", torch.randn(250, 250)),
+    ("Random 500*500", torch.randn(500, 500)),
+    ("Random 750*750", torch.randn(750, 750)),
     ("Random 1000*1000", torch.randn(1000, 1000)),
+    ("Random 1500*1500", torch.randn(1500, 1500)),
     ("Random 2000*2000", torch.randn(2000, 2000)),
+    ("Random 3000*3000", torch.randn(3000, 3000)),
     ("Random 5000*5000", torch.randn(5000, 5000))
 ]
 
@@ -154,25 +164,23 @@ def main():
         adaptive_result, t_adaptive = measure_time(expm_adaptive, A)
         error_adaptive = torch.norm(adaptive_result - exact) / torch.norm(exact)
 
+        # 4️⃣ Orthogonal Sketch + Pade
+        sketch_params = (5, min(64, max(8, A.shape[0] // 2)))
+        sketch_result, t_sketch = measure_time(
+            lambda X: expm_pade_orthogonal_sketch(X, sketch_params),
+            A
+        )
+        error_sketch = torch.norm(sketch_result - exact) / torch.norm(exact)
+
+        X_pade, t_pade = measure_time(expm_pade, A)
+        err_pade = torch.norm(X_pade - exact) / torch.norm(exact)
+
         # Вывод
         print(f"Time torch.matrix_exp : {t_exact:.6f} sec")
-        print(f"Time Taylor          : {t_taylor:.6f} sec, rel_error = {error_taylor:.3e}")
-        print(f"Time Adaptive        : {t_adaptive:.6f} sec, rel_error = {error_adaptive:.3e}")
-
+        print(f"Time Taylor           : {t_taylor:.6f} sec, rel_error = {error_taylor:.3e}")
+        print(f"Time Pade             : {t_pade:.6f} sec, rel_error = {err_pade:.3e}")
+        print(f"Time Sketch           : {t_sketch:.6f} sec, rel_error = {error_sketch:.3e}")
+        print(f"Time Adaptive         : {t_adaptive:.6f} sec, rel_error = {error_adaptive:.3e}")
 
 if __name__ == "__main__":
     main()
-
-# выбрать признаки и на их основании обучить модель чтобы на больших матрицах разного типа натренировалась ✅
-# чтобы предсказывало на каком этапе переключаться с тейлора на паде и посмотреть станет ли ошибка меньше ✅
-# посмотреть методы подсчета ошибок на очень больших матрицах ✅
-# может быть параллельные вычисления ✅
-# сделать текст по поводу того какие признаки были выбраны, дополнить файл
-# включить в текст тесты по типам матриц (таблица размерность, время и ошибка) ✅
-# то же самое сделать для всех типов матриц которые мы расматривали ✅
-# сделать плохообусловленые матрицы ✅
-# сравнить рещультаты до внедрения машинного обучения и после ✅
-# подумать над признаками для обучения ✅
-# чтобы решал сначала тейлором, потом паде и выбирал отсечку на каком этапе он меняет метод ✅
-# попробую обучить модель на огромных данных и мб залетит
-# если не залетит то используем численные методы на огромных матрицах, при этом оптимизируем их
